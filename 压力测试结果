@@ -8,7 +8,7 @@ Req/Sec 2.49k 2.12k 20.46k 76.13%
 Requests/sec: 43646.43
 Transfer/sec: 4.54MB
 
-// 手机热点局域网，本地回环测试
+// 手机热点局域网，本地测试
 wrk -t20 -c500 -d20s http://192.168.233.127:8888
 
 hegang@LAPTOP-RLQFCN8B:~/UCP$ wrk -t20 -c500 -d20s http://192.168.233.127:8888
