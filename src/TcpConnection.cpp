@@ -64,9 +64,13 @@ void TcpConnection::forceClose()
     TcpConnectionState expected = TcpConnectionState::kConnected;
     if (state_.compare_exchange_strong(expected, TcpConnectionState::kDisconnecting))
     {
+        LOG_INFO("TcpConnection::forceClose CAS success, queueing handleClose, conn={}", name_);
         loop_->queueInLoop(std::bind(&TcpConnection::handleClose, shared_from_this()));
     }
-    // 如果已经是 kDisconnecting，不重复提交
+    else
+    {
+        LOG_INFO("TcpConnection::forceClose CAS failed, state={}, conn={}", static_cast<int>(expected), name_);
+    }
 }
 
 void TcpConnection::submitReadRequest(size_t nbytes)
@@ -214,21 +218,29 @@ void TcpConnection::setTimeout(std::chrono::milliseconds timeout)
 
 void TcpConnection::handleClose()
 {
+    LOG_INFO("TcpConnection::handleClose called, conn={}, state={}", name_, static_cast<int>(state_.load()));
     TcpConnectionState state = state_.load();
     if (state == TcpConnectionState::kDisconnected)
     {
+        LOG_INFO("TcpConnection::handleClose already disconnected, conn={}", name_);
         return;
     }
     state_.store(TcpConnectionState::kDisconnecting);
     if (closeCallbackInvoked_.exchange(true))
     {
+        LOG_INFO("TcpConnection::handleClose closeCallback already invoked, conn={}", name_);
         return;
     }
     // 保护 TcpConnection，防止在回调过程中被销毁
     std::shared_ptr<TcpConnection> guard(shared_from_this());
     if (closeCallback_)
     {
+        LOG_INFO("TcpConnection::handleClose calling closeCallback, conn={}", name_);
         closeCallback_(guard);
+    }
+    else
+    {
+        LOG_WARN("TcpConnection::handleClose closeCallback is null, conn={}", name_);
     }
 }
 
@@ -285,6 +297,8 @@ void TcpConnection::connectEstablished()
 
 void TcpConnection::connectDestroyed()
 {
+    LOG_INFO("TcpConnection::connectDestroyed called, conn={}, state={}, fd={}", name_, static_cast<int>(state_.load()),
+             socket_.getFd());
     if (state_ == TcpConnectionState::kConnected || state_ == TcpConnectionState::kDisconnecting)
     {
         setState(TcpConnectionState::kDisconnected);
@@ -295,6 +309,7 @@ void TcpConnection::connectDestroyed()
     // 否则如果还有其他地方（比如 io_uring 的 IoContext）持有 shared_ptr，
     // Socket 的析构函数就不会被调用，fd 就不会被关闭，连接也就一直挂着。
     socket_.closeFd();
+    LOG_INFO("TcpConnection::connectDestroyed fd closed, conn={}", name_);
 
     // io_uring 中挂起的请求会因为 fd 关闭而以 -ECANCELED 或 -EBADF 失败。
 

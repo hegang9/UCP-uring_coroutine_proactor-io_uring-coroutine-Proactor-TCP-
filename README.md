@@ -1,43 +1,67 @@
-## UCP: 基于 io_uring 的高性能 C++ Proactor 网络框架
-### 项目简介
-该系统是一个专为 Linux 环境设计的高性能 TCP 服务器框架。它摒弃了传统的 epoll + Reactor 模型，全面拥抱 Linux io_uring 异步 I/O 接口，实现了纯粹的 Proactor 模式。该系统的核心目标是极致的性能与低延迟。通过“内核执行 I/O，完成后通知应用”的机制，结合 C++20 协程、无锁任务队列、零拷贝等现代技术，最大化利用多核 CPU 资源，适用于海量并发连接的高频交易、即时通讯及高性能网关等场景。
+<h1 align="center">UCP (Ultimate C++ Proactor)</h1>
 
-### 核心架构设计
-在架构设计上，系统采用了 One Ring Per Thread（即 Main-Sub Proactor）的多线程模型。系统由一个主线程（Main Proactor）和多个工作线程（Sub Proactor）组成。主线程持有一个独立的 io_uring 实例，专门负责监听端口和分发新建立的连接；工作线程池中的每个线程也各自持有一个独立的 io_uring 实例，负责接管已连接 Socket 的所有后续读写操作和业务逻辑处理。这种设计确保了每个连接的生命周期绑定在一个特定的线程中，实现了无锁编程，避免了多线程竞争，同时能够充分利用多核 CPU 资源。同时，为了解决异步编程中“**回调地狱**”的问题，系统引入了 C++20 无栈协程。通过定制 promise_type 和 awaiter，将 io_uring 的异步完成事件与协程的 resume 动作无缝对接。
+<p align="center">
+  <b>基于 io_uring 与 C++20 协程的极致高性能纯异步网络框架</b>
+</p>
 
-核心控制层主要包含 TcpServer、EventLoop 和 Acceptor 三大模块。TcpServer 作为系统的总控入口，负责启动服务器、管理 Acceptor 和 EventLoopThreadPool。Acceptor 封装了监听 Socket，利用 IORING_OP_ACCEPT 异步接受连接。EventLoop 是系统的核心引擎，封装了 io_uring 的提交队列（SQ）和完成队列（CQ），驱动整个异步事件循环。为了解决跨线程任务分发问题，EventLoop 内部不仅集成了任务队列，还利用 **eventfd 机制**实现了线程唤醒功能，使得主线程可以高效地将新连接均匀分发给工作线程（Round-Robin 负载均衡），唤醒阻塞在 I/O 等待中的子线程。
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Linux-blue.svg" alt="Platform">
+  <img src="https://img.shields.io/badge/C++-20-blue.svg" alt="C++20">
+  <img src="https://img.shields.io/badge/io__uring-5.10+-brightgreen.svg" alt="io_uring">
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
+</p>
 
-在业务连接与数据处理层，系统划分为 TcpConnection、IoContext 及辅助组件。TcpConnection 负责管理单个 TCP 连接的完整生命周期，处理异步读写请求的提交。为了在 C 语言风格的 io_uring 接口和 C++ 对象之间建立联系，系统设计了 IoContext 模块，它封装了单次 I/O 操作的上下文（如文件描述符、缓冲区指针、回调函数等），作为 user_data 传递给内核，确保请求完成 review 时能准确回调。此外，系统还包含 Buffer 模块用于应用层数据缓冲，以及 MemoryPool 模块优化频繁的小块内存分配，共同保障数据传输的高效与稳定。
+## 📖 项目简介
+该系统是一个专为 Linux 环境设计的高性能 TCP 服务器框架。它摒弃了传统的 `epoll + Reactor` 模型，全面拥抱 Linux **io_uring** 异步 I/O 接口，实现了纯粹的 **Proactor** 模式。
 
-### 性能优化设计
-1. 使用内存池优化小块内存分配；
-2. 配置 IORING_SETUP_SQPOLL 开启内核轮询线程。应用提交任务仅需更新队列尾指针，无需任何系统调用 (Zero Syscall)，实现低延迟；
-3. 实现多个连接读写请求的批量提交，大大减少了系统调用次数；
-4. 引入了C++20无栈协程，避免了“回调地狱”，提升了系统的可维护性和可读性。C++20 协程在编译器层面进行了深度优化，其性能表现相较于传统回调模式相差无几甚至更好；
-5. 利用了 io_uring 的 注册缓冲区 (Registered Buffer) 特性，减少 I/O 操作期间内核进行内存页面映射的开销，从而实现从内核视角的零拷贝（避免了每次 I/O 都调用的 get_user_pages/put_page 开销），大幅提升高并发下的读写性能；
-6. 利用了 io_uring 提供的一种为任何异步请求设置超时的Link Timeout机制，避免了用户态手动开启定时器、取消定时器的复杂竞态条件，不需要用户态维护繁重的红黑树或时间轮（Time Wheel），而是利用内核的高效定时机制；
-7. 自实现无锁队列作为任务队列，避免多个线程竞争锁资源导致性能下降，实现了吞吐量跨越式提升。
+本项目的核心目标是**极致的性能与低延迟**。通过“内核执行 I/O，完成后通知应用”的机制，结合 C++20 无栈协程、无锁任务队列、零拷贝等现代前沿技术，最大化利用多核 CPU 资源。适用于海量并发连接的高频交易、即时通讯及高性能网关等场景。
 
-## 环境依赖 (Prerequisites)
-运行本系统需要较新的 Linux 内核以支持 io_uring 的完整特性，同时需要支持 C++20 的编译器。
-*   **操作系统**: Linux Kernel **5.10+** (推荐 5.19 或更高版本以获得最佳性能及完善的 io_uring 支持)。
-*   **编译器**: GCC **11.0+** 或 Clang **14.0+** (必须完整支持 C++20 标准)。
-*   **依赖库**: [liburing](https://github.com/axboe/liburing) (推荐 v2.2 及以上版本)和fmt库。
-*   **构建工具**: CMake **3.10+**。
+## ✨ 核心特性与优化设计
+- **🚀 内核级轮询 (Zero Syscall)**: 配置 `IORING_SETUP_SQPOLL` 开启内核轮询线程。应用投递任务仅需更新队列尾指针，极大概率免除 `io_uring_enter` 系统调用开销，实现原生极低延迟。
+- **⚡ 内核级零拷贝 (Zero Copy)**: 深度利用 io_uring 的 **Registered Buffers** 特性预先固定内存映射。避免高并发 I/O 时内核频繁执行 `get_user_pages`/`put_page` 开销，大幅提升极速读写性能。
+- **🧵 C++20 无栈协程解耦**: 利用 C++20 协程定制 `promise_type` 与 `awaiter`，将异步 SQE 提交与 CQE 收割无缝桥接至协程的挂起与恢复，用同步代码思路编写异步流，彻底告别“回调地狱（Callback Hell）”。
+- **🎯 One Ring Per Thread 无锁调度**: 采用主从 Proactor 多线程模型。主线程专属 Accept，子线程独立接管 io_uring 数据流。单连接完整生命周期极致绑定单一线程，规避所有跨线程抢锁开销。
+- **⏱️ 内核级定时器代理**: 废弃用户态红黑树/时间轮等繁重逻辑，全面将请求超时、死链检测代理给 io_uring 专属的 `Link Timeout` 机制，降低 CPU 无意义开销。
+- **📦 高性能组件引擎**: 底层内置针对小报文优化的 `MemoryPool` (内存池)；跨线程派发任务采用基于数组的**无锁任务队列**结合内核事件描述符 `eventfd`，以极限开销完成线程间的休眠唤醒。
 
-## 项目目录结构
+## 🏗️ 核心架构图解
+模块层次严密划分如下：
+*   **控制与调度层**: `TcpServer`（系统总控封装），`EventLoop`（io_uring 基于事件的底层驱动引擎），`Acceptor`（用于建立高频连接处理的源头）。
+*   **业务抽象层**: `TcpConnection`（抽象与追踪 TCP 整个闭环生命周期及异步读写流），`IoContext`（将 I/O 操作、回调指针、底层内存高度封装并投递给内核态的 `user_data`）。
+*   **公共组件设施**: `Buffer`（智能动扩容读写应用缓冲区），`MemoryPool`（多级碎片整理内存池）。
+
+## 🛠️ 环境依赖 (Prerequisites)
+运行本系统需要较新的 Linux 内核以支持 io_uring 的完整特性，同时需要支持 C++20 的构建体系。
+*   **操作系统**: Linux Kernel **5.10+** (强烈推荐 5.19 或更高版本以获得极速特性和完美调度)。
+*   **编译器**: GCC **11.0+** 或 Clang **14.0+** (需完整支持 C++20 协程语义)。
+*   **依赖库**: 
+    - [liburing](https://github.com/axboe/liburing) (推荐 v2.2 及以上版本，作为 io_uring 的官方 C 接口封装)
+    - [fmt](https://github.com/fmtlib/fmt) 现代 C++ 格式化库
+*   **构建工具**: CMake **3.10+**
+
+## 📂 项目结构
 ```text
-├── src/            # 核心源文件
-├── include/        # 头文件
-├── memory/         # 内存池实现
-└── bin/            # 编译输出目录
+UCP/
+├── bin/            # 编译输出的可执行文件及核心二进制
+├── build/          # CMake 构建中间目录
+├── benchmark.sh    # 自动化抗压测试脚本
+├── client/         # 各种异常边界与稳定连通性测试客户端
+├── config/         # 默认启动与性能参数集
+├── include/        # 核心框架逻辑声明定义
+├── log/            # 高性能落地无锁日志系统具体实现
+├── memory/         # Slab环形缓冲级别内存池机制
+└── src/            # UCP 框架核心通信机制与事件实现
 ```
 
-## 配置系统
-项目新增轻量配置系统，使用 `ini` 风格配置文件（支持 `[section]` 与 `key=value`）。默认配置文件路径为 `config/ucp.conf`，也可通过启动参数指定。
+## ⚙️ 配置与日志系统
+项目新增轻量级通用 `.conf` (INI风格) 配置文件，系统默认路径为 `config/ucp.conf`。通过配置文件可从运行逻辑剥离各项底层参数进而调优。
 
-示例：
-```text
+与此同时，UCP 框架内置极速多 Sink 异步非阻塞日志系统。直接将 I/O 线程日志无锁打入内存队列，再通过独立的日志线程专门执行刷盘（Flush）操作避免卡死 I/O 主流程。
+
+<details>
+<summary><b>👉 点击查看核心配置范例 (ucp.conf)</b></summary>
+
+```ini
 [server]
 name = TcpServer
 ip = 0.0.0.0
@@ -62,55 +86,67 @@ async = true
 console = true
 flush_interval_ms = 1000
 ```
+</details>
 
+<details>
+<summary><b>👉 点击查看日志接入及特色参数说明</b></summary>
 
-## 日志系统
-基于 `fmt` 库实现的高性能异步日志系统，核心特性：
-- **异步无阻塞**：I/O 线程写入无锁队列，后台线程负责落盘
-- **分级输出**：TRACE/DEBUG/INFO/WARN/ERROR/FATAL，运行时可配置
-- **自动滚动**：按大小或时间滚动日志文件
-- **多 Sink 支持**：同时输出到控制台和文件
+核心极速特性与功能支持：
+- **异步无阻塞落盘**: 日志写入端执行彻底无锁的 `Push（推入队列与EventFD）` 极大拉低日志对于请求耗时与计算单元拖拽。
+- **动态自适应输出**: 支持从 `TRACE` 到 `FATAL` 共计 6 级颗粒输出，完全支撑高度调试环境需要。
+- **极佳分流支持**: 基于大小的 Rotate，保留一定总数的滚卷策略 (`max_size / max_files`)，控制磁盘增长边界。同时灵活控制 `Console(前台)` 和 `Async File Sink` 的定向策略。
 
-使用示例：
+极简洁的框架内置宏调用：
 ```cpp
 LOG_INFO("Server started on {}:{}", ip, port);
 LOG_WARN("Connection timeout: fd={}", fd);
 LOG_ERROR("Accept failed: {}", strerror(errno));
 ```
-
-配置项（`config/ucp.conf` 的 `[log]` 段）：
-- `level`：日志级别（TRACE/DEBUG/INFO/WARN/ERROR/FATAL）
-- `file`：日志文件路径
-- `max_size`：单个日志文件最大大小（字节）
-- `max_files`：保留的日志文件数量
-- `async`：是否启用异步日志（true/false）
-- `console`：是否输出到控制台（true/false）
-- `flush_interval_ms`：后台线程刷新间隔（毫秒）
+</details>
 
 
 
 
-## 构建命令
-mkdir build
-cd build
+## 🚀 快速开始 (Getting Started)
+
+### 1. 构建 UCP 框架
+```bash
+mkdir build && cd build
 cmake ..
 make -j"$(nproc)"
+```
 
-## 启动命令
-cd /home/hegang/UCP && sudo sh -c "ulimit -n 100000 && ulimit -l unlimited && ./bin/proactor_test config/ucp.conf"
+### 2. 启动单机 UCP 微服务
+> **注:** 为了应对千万级并发网络风暴，首要解决的是重置操作系统硬性 FD 上线，并发起针对 io_uring 内核常驻内存配置 `unlimited`！
+```bash
+cd /home/hegang/UCP 
+sudo sh -c "ulimit -n 100000 && ulimit -l unlimited && ./bin/proactor_test config/ucp.conf"
+```
 
-## 内存泄漏检测启动命令 (使用 Valgrind)
-cd /home/hegang/UCP && sudo sh -c "ulimit -n 100000 && ulimit -l unlimited && valgrind --leak-check=full --show-leak-kinds=all ./bin/proactor_test config/ucp.conf"
-
-## 依次执行正常收发、慢速发送、空闲超时、异常断开和少量并发的测试客户端程序
+### 3. 一次性边界回归与连通性自验证客户端
+我们在系统中内置了一个专门用于进行连通性确认、延迟异常与业务鲁棒性对抗的套件程序：
+```bash
 cd /home/hegang/UCP
 ./client/test_client all
+```
+> *(执行上述命令会依次验证正常收发、慢速客户端抗压、无响应 TCP 空闲踢除、非法越权断开等关键用例)*
 
-## 压测脚本
+## 📊 性能表现与抗压结果 (Benchmarks)
+我们在极度苛刻、完全剥离并且**不受物理网卡带宽妥协的本机局域网 Loopback 环回测试**环境中，对本系统的高阶吞吐极值天花板能力展开拷机实战：
+
+运行自带的一体化自动化压测工具集：
+```bash
 ./benchmark.sh
+```
 
-## 性能测试数据
-在Intel Core i7-14700HX CPU，16个子工作线程，pingpong业务逻辑条件下，使用wrk进行压力测试数据如下：
+**实战压测报告：**
+- **测试硬件宿主**: Intel Core i7-14700HX
+- **主被动压测设置**: 运行 16 条系统级 Sub Proactor 子线程, 基于强烈的 Ping-Pong Echo 短包高频业务对抗
+- **成绩汇总**: 在与压测端建立多达 **4000 个 TCP 真实并发连接** 后，系统展现出了极佳的吞吐与延迟控制能力。单侧峰值处理能力达到了 **124万 RPS (每秒请求处理量)**、约 **129.67 MB/s 的传输吞吐量**，且在高压满载状态下，平均通信延迟稳定保持在 **1.49ms - 1.62ms** 之间，P99延迟控制在8ms上下。
+
+<details>
+<summary><b>👉 点击查看详细的 3000 ~ 4000 并发分级压测报告日志输出</b></summary>
+
 ```text
 Connections: 3000
 Running 20s test @ http://192.168.2.69:6666
@@ -289,3 +325,7 @@ Requests/sec: 1193004.26
 Transfer/sec:    124.01MB
 ==========================================================
 ```
+</details>
+
+## 📄 开源协议 (License)
+本项目遵守 **[MIT](https://opensource.org/licenses/MIT)** 开源协议。欢迎同样沉迷于 C++ 极致性能、现代协程编程和疯狂压榨底层 Linux io_uring 引擎魔力的同好，提交 `PR` 或 `Issue`。

@@ -86,7 +86,7 @@ void test_slow_client(const string &ip, int port)
     char buffer[4096] = {0};
     // 设置一个较短的超时时间来读取，防止一直阻塞
     struct timeval tv;
-    tv.tv_sec = 2;
+    tv.tv_sec = 2; // 2秒超时
     tv.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
 
@@ -107,25 +107,44 @@ void test_slow_client(const string &ip, int port)
 // 3. 异常测试：半开连接/空闲连接 (连接后什么都不做，测试服务器的超时踢出机制)
 void test_idle_connection(const string &ip, int port)
 {
-    cout << "[测试 3] 空闲连接测试开始 (连接后睡眠6秒，测试服务器超时断开)..." << endl;
+    cout << "[测试 3] 空闲连接测试开始 (连接后等待，测试服务器超时断开)..." << endl;
     int sock = create_connection(ip, port);
     if (sock < 0)
         return;
 
-    cout << "  -> 已连接，开始睡眠等待服务器主动断开..." << endl;
-    // 根据 ucp.conf，read_timeout_ms = 5000 (5秒)
-    // 我们睡眠6秒，预期服务器会主动关闭连接
-    this_thread::sleep_for(chrono::seconds(6));
+    cout << "  -> 已连接，使用 read() 等待服务器主动断开 (超时配置=5s)..." << endl;
 
-    string msg = "GET / HTTP/1.1\r\n\r\n";
-    int sent = send(sock, msg.c_str(), msg.length(), MSG_NOSIGNAL); // 忽略SIGPIPE
-    if (sent < 0)
+    // 正确方式：用 read() 检测服务端是否发送了 FIN
+    // 设置一个比服务端超时稍长的读超时（比如 10 秒），防止无限阻塞
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+
+    auto start = chrono::steady_clock::now();
+    char buffer[1024];
+    int valread = read(sock, buffer, sizeof(buffer));
+    auto elapsed = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - start);
+
+    if (valread == 0)
     {
-        cout << "  -> 发送失败，符合预期 (服务器已主动关闭连接)" << endl;
+        // read() 返回 0 表示对端发送了 FIN（正常关闭）
+        cout << "  -> read() 返回 0，服务器在 " << elapsed.count() << "ms 后主动关闭了连接，符合预期 ✅" << endl;
+    }
+    else if (valread < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    {
+        // 读超时，说明服务器 10 秒内没有关闭连接
+        cout << "  -> read() 超时 (" << elapsed.count() << "ms)，服务器未主动关闭连接，不符合预期 ❌" << endl;
+    }
+    else if (valread < 0)
+    {
+        // 其他错误（如 ECONNRESET），也说明服务器关闭了连接
+        cout << "  -> read() 返回错误: " << strerror(errno) << "，" << elapsed.count() << "ms 后连接被关闭 ✅" << endl;
     }
     else
     {
-        cout << "  -> 发送成功，不符合预期 (服务器未关闭连接)" << endl;
+        // 收到了数据，不应该发生（空闲连接不应有数据）
+        cout << "  -> 意外收到 " << valread << " 字节数据" << endl;
     }
 
     close(sock);

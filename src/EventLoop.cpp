@@ -272,12 +272,12 @@ void EventLoop::handleCompletionEvent(io_uring_cqe *cqe)
     // 优先检查是否是协程模式
     if (ctx->coro_handle)
     {
-        // 协程模式：保存结果到 Awaitable 对象，然后恢复协程
+        // 协程模式：保存结果到 Awaitable 对象，然后恢复协程，用于 Read/Write 的协程接口，业务逻辑
         ctx->coro_handle.resume(); // 恢复协程执行
     }
     else if (ctx->handler)
     {
-        // 传统回调模式
+        // 传统回调模式，用于Acceptor的连接事件和 EventLoop的唤醒事件
         ctx->handler(result);
     }
 }

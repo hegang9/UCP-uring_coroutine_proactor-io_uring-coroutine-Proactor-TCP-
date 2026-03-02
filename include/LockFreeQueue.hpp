@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+// MPMC环形无锁队列（多生产者多消费者）
+
 template <typename T> class LockFreeQueue
 {
   private:
@@ -76,13 +78,14 @@ template <typename T> template <typename U> inline bool LockFreeQueue<T>::enqueu
 
     while (true)
     {
-        slot = &buffer_[pos & bufferMask_]; // 计算槽索引
+        slot = &buffer_[pos & bufferMask_]; // 利用快速取模计算槽索引
         size_t seq = slot->sequence.load(std::memory_order_acquire);
+        // seq 与 pos 的差值用于判断槽位状态：0=可写，<0=队列满，>0=被其他线程占用
         intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos); // 计算序列号差值
 
         if (dif == 0)
         {
-            // 槽位可用，尝试占用
+            // 槽位可用，CAS 抢占该槽位
             if (enqueuePos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
             {
                 break;
@@ -94,10 +97,12 @@ template <typename T> template <typename U> inline bool LockFreeQueue<T>::enqueu
         }
         else
         {
+            // 竞争失败，重新读取最新入队位置再重试
             pos = enqueuePos_.load(std::memory_order_relaxed);
         }
     }
 
+    // 将数据写入槽位，再发布序列号表示“可读”
     slot->data = std::forward<U>(data);
     slot->sequence.store(pos + 1, std::memory_order_release);
     return true;
@@ -122,11 +127,12 @@ template <typename T> inline bool LockFreeQueue<T>::dequeue(T &data)
     {
         slot = &buffer_[pos & bufferMask_]; // 计算槽索引
         size_t seq = slot->sequence.load(std::memory_order_acquire);
+        // seq 与 pos+1 的差值用于判断槽位状态：0=可读，<0=队列空，>0=被其他线程占用
         intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1); // 计算序列号差值
 
         if (dif == 0)
         {
-            // 槽位有数据，尝试占用
+            // 槽位有数据，CAS 抢占该槽位
             if (dequeuePos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
             {
                 break;
@@ -138,10 +144,12 @@ template <typename T> inline bool LockFreeQueue<T>::dequeue(T &data)
         }
         else
         {
+            // 竞争失败，重新读取最新出队位置再重试
             pos = dequeuePos_.load(std::memory_order_relaxed);
         }
     }
 
+    // 取出数据后，发布新的序列号表示“可写”进入下一轮
     data = std::move(slot->data);
     slot->sequence.store(pos + buffer_.size(), std::memory_order_release);
     return true;
