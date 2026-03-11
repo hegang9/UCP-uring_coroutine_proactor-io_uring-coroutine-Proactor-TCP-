@@ -22,10 +22,11 @@ void EventLoopThreadPool::start(const ThreadInitCallback &cb)
 
     for (int i = 0; i < numThreads_; ++i)
     {
-        auto t = std::make_unique<EventLoopThread>(loopOptions_, cb);
+        auto t = std::make_unique<EventLoopThread>(loopOptions_,
+                                                   cb); // 创建一个新的 EventLoopThread 对象，传入线程初始化回调
         loops_.push_back(t->startLoop());
         LOG_INFO("ThreadPool started worker {}, loop={}", i, static_cast<void *>(loops_.back()));
-        threads_.push_back(std::move(t));
+        threads_.push_back(std::move(t)); // 将线程对象添加到线程池中，使用 move 语义转移所有权
     }
 
     if (numThreads_ == 0 && cb)
