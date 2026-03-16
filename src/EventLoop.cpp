@@ -81,6 +81,7 @@ EventLoop::EventLoop(const Options &options)
     int ret = io_uring_queue_init_params(static_cast<unsigned int>(options_.ringEntries), &ring_, &params);
     if (ret < 0)
     {
+        // TODO：这里可以考虑抛出异常或者返回错误码，当前简单处理为日志记录和终止程序
         LOG_ERROR("io_uring_queue_init failed: {}", ret);
         abort();
     }
@@ -126,7 +127,7 @@ void EventLoop::loop()
         // 必须在等待之前提交，否则内核不知道有新请求，可能死锁
         if (io_uring_sq_ready(&ring_) > 0)
         {
-            io_uring_submit(&ring_);    // 更新尾指针，以便内核看到新请求
+            io_uring_submit(&ring_); // 更新尾指针，以便内核看到新请求
         }
 
         struct io_uring_cqe *cqe;

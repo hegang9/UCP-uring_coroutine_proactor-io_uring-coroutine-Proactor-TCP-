@@ -16,6 +16,7 @@ static int createNonblockingSocket()
     int listenSocketFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
     if (listenSocketFd < 0)
     {
+        // TODO: 这里可以考虑抛出异常或者返回错误码，当前简单处理为日志记录和终止程序
         LOG_ERROR("Acceptor socket create failed: {}", std::strerror(errno));
         abort();
     }
@@ -76,7 +77,7 @@ void Acceptor::asyncAccept()
 
 void Acceptor::handleRead(int res)
 {
-    // res 是 accept 的返回值，即新的 connfd
+    // res 是 io_uring 异步 accept 的返回值，即第一个新的 connfd
     if (res >= 0)
     {
         int connfd = res;
@@ -89,10 +90,46 @@ void Acceptor::handleRead(int res)
         {
             ::close(connfd); // 没有回调函数，关闭连接
         }
+
+        // 方案B核心优化：不断调用非阻塞 accept4 榨干全连接队列，直到返回 EAGAIN
+        while (listening_)
+        {
+            clientAddrLen_ = sizeof(clientAddr_);
+            int nextConnfd = ::accept4(listenSocket_.getFd(), (struct sockaddr *)&clientAddr_, &clientAddrLen_,
+                                       SOCK_NONBLOCK | SOCK_CLOEXEC);
+            if (nextConnfd >= 0)
+            {
+                InetAddress nextPeerAddr(clientAddr_);
+                if (newConnectionCallback_)
+                {
+                    newConnectionCallback_(nextConnfd, nextPeerAddr);
+                }
+                else
+                {
+                    ::close(nextConnfd);
+                }
+            }
+            else
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    break; // 全连接队列已空，退出循环等下一波 io_uring 通知
+                }
+                else if (errno == EINTR)
+                {
+                    continue; // 信号中断，继续尝试
+                }
+                else
+                {
+                    LOG_ERROR("Acceptor loop accept4 failed: {}", std::strerror(errno));
+                    break;
+                }
+            }
+        }
     }
     else
     {
-        // accept 失败
+        // io_uring accept 失败
         // 如果是 ECANCELED，说明可能是 EventLoop 正在退出
         if (res != -ECANCELED)
         {
@@ -101,10 +138,9 @@ void Acceptor::handleRead(int res)
         }
     }
 
-    // 只要还在监听状态，就必须继续提交下一个 accept 请求
-    if (listening_)
+    // 队列已经空了（或者发生非致命错误），只要还在监听且未被取消，就再次向 io_uring 提交下一次等待
+    if (listening_ && res != -ECANCELED)
     {
-        // 重置 clientAddrLen_，因为 accept 可能会修改它
         clientAddrLen_ = sizeof(clientAddr_);
         asyncAccept();
     }
