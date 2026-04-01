@@ -11,6 +11,7 @@
 #include "EventLoop.hpp"
 #include "InetAddress.hpp"
 #include "IoContext.hpp"
+#include "Logger.hpp"
 #include "MemoryPool.hpp"
 #include "Socket.hpp"
 
@@ -69,6 +70,24 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection>
     {
         return state_.load() == TcpConnectionState::kDisconnecting;
     }
+    // 连接状态检查：在提交读写请求前检查连接状态，避免无效操作
+    /**
+     * 为什么kDisConnecting状态也算是有效状态？因为在这个状态下，连接虽然正在断开，但还没有完全断开，底层Socket还没有被关闭，所以仍然可以提交写请求来发送剩余数据，或者提交读请求来读取对端发送的最后数据（如ACK）。如果在这个状态下拒绝提交请求，就无法实现优雅的连接关闭了。
+     * 当然，如果业务场景不需要在断开过程中继续读写，也可以选择更严格地只允许kConnected状态，这取决于具体需求。
+     * 这里的设计是为了提供更大的灵活性，让用户根据自己的业务需求来决定是否允许在断开过程中继续操作。
+     * 但无论如何，在提交请求前都应该检查连接状态，避免在完全断开后提交无效请求导致错误。
+     *
+     */
+    bool checkConnected() const
+    {
+        if (isConnected() || isDisconnecting())
+        {
+            return true;
+        }
+        LOG_WARN("TcpConnection::checkConnected: invalid state, name={}, state={}", name_,
+                 static_cast<int>(state_.load()));
+        return false;
+    }
 
     // 重置TcpConnection，防止复用内存池中的内存时还残留上一个TcpConnection的脏数据
     void reset();
@@ -99,6 +118,8 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection>
 
     // 发送FIN包，半关闭写端
     void shutdown();
+    // 检查并在合适的时机执行半关闭
+    void maybeShutdownWrite();
     // 强制关闭连接
     void forceClose();
 
@@ -111,6 +132,8 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection>
     void submitWriteRequest();
     void submitWriteRequestWithRegBuffer(void *buf, size_t len, int idx);
     void submitSendfileRequest(int in_fd, off_t offset, size_t count);
+    void submitWriteRequestWithZeroCopy(const char *data, size_t len, bool isZc);      // 游离用户缓冲区的零拷贝发送
+    void submitWriteRequestWithZeroCopy(void *regBuf, size_t len, int idx, bool isZc); // 已注册缓冲区的零拷贝发送
 
     // 设置超时时间
     void setTimeout(std::chrono::milliseconds timeout);
@@ -145,9 +168,9 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection>
         return asyncWrite();
     }
 
-    // 零拷贝发送：直接从已注册缓冲区发送数据，不经过 outputBuffer_
-    // 通常用于 Echo 等场景：读到的数据直接原样发回
-    AsyncWriteAwaitable asyncSendZeroCopy()
+    // 固定缓冲区发送：直接从已注册缓冲区发送数据，不经过 outputBuffer_
+    // 通常用于 Echo 、高性能网关代理等场景：读到的数据不需要解析
+    AsyncWriteAwaitable asyncSendRegisteredBuffer()
     {
         // 使用当前读缓冲区的数据直接发送
         return AsyncWriteAwaitable(this, curReadBuffer_, curReadBufferSize_, readContext_.idx);
@@ -156,7 +179,14 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection>
     // Sendfile 零拷贝发送：直接将文件内容发送到 socket，不经过用户态缓冲区
     AsyncWriteAwaitable asyncSendfile(int in_fd, off_t offset, size_t count)
     {
-        return AsyncWriteAwaitable(this, in_fd, offset, count);
+        return AsyncWriteAwaitable(this, in_fd, offset, count, true);
+    }
+
+    // IORING_OP_SEND_ZC 零拷贝发送：直接从用户态缓冲区发送数据，绕过内核协议栈的内存拷贝
+    AsyncWriteAwaitable asyncSendZeroCopy(const char *data, size_t len)
+    {
+        checkOutputBufferBackpressure(len);
+        return AsyncWriteAwaitable(this, const_cast<char *>(data), len, true);
     }
 
     // 提供获取IoContext的接口
@@ -255,6 +285,22 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection>
     // 销毁连接（在所属 Loop 执行）
     void connectDestroyed();
 
+    // 检查当前连接是否有未完成的异步固定缓冲区/Sendfile/Zero-Copy发送请求
+    bool hasPendingSpecialWrite() const
+    {
+        return pendingSpecialWriteCount_.load() > 0;
+    }
+
+    void incrementPendingSpecialWrite()
+    {
+        pendingSpecialWriteCount_.fetch_add(1);
+    }
+
+    void decrementPendingSpecialWrite()
+    {
+        pendingSpecialWriteCount_.fetch_sub(1);
+    }
+
   private:
     // 背压检查：检查 outputBuffer 是否超过高水位，执行相应策略
     void checkOutputBufferBackpressure(size_t incomingBytes);
@@ -263,6 +309,8 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection>
     Socket socket_;                         // 连接的Socket对象
     std::atomic<TcpConnectionState> state_; // 连接状态
     std::string name_;                      // 连接名称
+
+    std::atomic<int> pendingSpecialWriteCount_{0}; // 有多少个特殊写请求(非 outputBuffer_ 的)正在被 io_uring 处理
 
     std::atomic_bool closeCallbackInvoked_{false}; // 防止关闭回调被重复触发的保护位
 

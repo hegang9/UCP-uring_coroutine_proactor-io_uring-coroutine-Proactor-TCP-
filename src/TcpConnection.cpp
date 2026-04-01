@@ -4,8 +4,6 @@
 
 #include <cstring>
 
-#include "Logger.hpp"
-
 TcpConnection::TcpConnection(const std::string &name, EventLoop *loop, int sockfd, const InetAddress &peerAddr)
     : name_(name), loop_(loop), socket_(sockfd), state_(TcpConnectionState::kConnecting), reading_(false),
       curReadBuffer_(nullptr), curReadBufferSize_(0), curReadBufferOffset_(0), outputBuffer_(),
@@ -51,10 +49,24 @@ void TcpConnection::reset()
 
 void TcpConnection::shutdown()
 {
-    // 发送FIN包，半关闭写端
+    // 发送FIN包，尝试半关闭写端
     if (state_.load() == TcpConnectionState::kConnected)
     {
         setState(TcpConnectionState::kDisconnecting);
+        // 仅当用户缓冲区没有积压数据，且没有挂起的特殊写操作(固定缓冲/ZC)时，才立刻物理关闭
+        if (outputBuffer_.readableBytes() == 0 && !hasPendingSpecialWrite())
+        {
+            socket_.shutdownWrite();
+        }
+    }
+}
+
+void TcpConnection::maybeShutdownWrite()
+{
+    // 这个方法通常由底层写回调(如 AsyncWrite 恢复时)调用
+    if (state_.load() == TcpConnectionState::kDisconnecting && outputBuffer_.readableBytes() == 0 &&
+        !hasPendingSpecialWrite())
+    {
         socket_.shutdownWrite();
     }
 }
@@ -232,6 +244,15 @@ void TcpConnection::submitSendfileRequest(int in_fd, off_t offset, size_t count)
 
     io_uring_sqe_set_data(sqe, &writeContext_);
     writeContext_.idx = -1; // 标记未使用已注册缓冲区
+}
+
+void TcpConnection::submitWriteRequestWithZeroCopy(const char *data, size_t len, bool isZc)
+{
+    if (!isConnected() && !isDisconnecting())
+    {
+        LOG_WARN("TcpConnection::submitSendfileRequest: invalid state, name={}", name_);
+        return;
+    }
 }
 
 void TcpConnection::setTimeout(std::chrono::milliseconds timeout)

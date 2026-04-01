@@ -14,19 +14,32 @@ class AsyncWriteAwaitable
     AsyncWriteAwaitable &operator=(const AsyncWriteAwaitable &) = delete;
     // 普通写操作，从 outputBuffer_ 发送数据
     AsyncWriteAwaitable(TcpConnection *conn)
-        : conn_(conn), regBuf_(nullptr), regBufLen_(0), regBufIdx_(-1), inFd_(-1), offset_(0), count_(0)
+        : conn_(conn), regBuf_(nullptr), regBufLen_(0), regBufIdx_(-1), inFd_(-1), offset_(0), count_(0), isZc_(false)
     {
     }
-    // 零拷贝写操作，直接从已注册缓冲区发送数据
+    // 固定缓冲区写操作，直接从已注册缓冲区发送数据
     AsyncWriteAwaitable(TcpConnection *conn, void *regBuf, size_t len, int idx)
-        : conn_(conn), regBuf_(regBuf), regBufLen_(len), regBufIdx_(idx), inFd_(-1), offset_(0), count_(0)
+        : conn_(conn), regBuf_(regBuf), regBufLen_(len), regBufIdx_(idx), inFd_(-1), offset_(0), count_(0), isZc_(false)
     {
     }
     // Sendfile 零拷贝操作
-    AsyncWriteAwaitable(TcpConnection *conn, int inFd, off_t offset, size_t count)
-        : conn_(conn), regBuf_(nullptr), regBufLen_(0), regBufIdx_(-1), inFd_(inFd), offset_(offset), count_(count)
+    AsyncWriteAwaitable(TcpConnection *conn, int inFd, off_t offset, size_t count, bool isZc)
+        : conn_(conn), regBuf_(nullptr), regBufLen_(0), regBufIdx_(-1), inFd_(inFd), offset_(offset), count_(count),
+          isZc_(isZc)
     {
     }
+    // 用户游离缓冲区的SEND_ZC零拷贝写操作
+    AsyncWriteAwaitable(TcpConnection *conn, const char *data, size_t len, bool isZc)
+        : conn_(conn), regBuf_(const_cast<char *>(data)), regBufLen_(len), regBufIdx_(-1), inFd_(-1), offset_(0),
+          count_(0), isZc_(isZc)
+    {
+    }
+    // 固定缓冲区的SEND_ZC零拷贝写操作
+    AsyncWriteAwaitable(TcpConnection *conn, void *regBuf, size_t len, int idx, bool isZc)
+        : conn_(conn), regBuf_(regBuf), regBufLen_(len), regBufIdx_(idx), inFd_(-1), offset_(0), count_(0), isZc_(isZc)
+    {
+    }
+
     bool await_ready() const noexcept
     {
         return false;
@@ -47,7 +60,7 @@ class AsyncWriteAwaitable
 
   private:
     TcpConnection *conn_; // 关联的TcpConnection对象
-    void *regBuf_;        // 已注册缓冲区指针（零拷贝模式）
+    void *regBuf_;        // 已注册缓冲区指针
     size_t regBufLen_;    // 已注册缓冲区数据长度
     int regBufIdx_;       // 已注册缓冲区索引（用于写完后归还）
 
@@ -58,4 +71,7 @@ class AsyncWriteAwaitable
     // 背压机制相关状态（仅在 kBlock 策略下生效）
     int totalWritten_ = 0;   // 记录在阻塞期间，底层 io_uring 累计成功写入的字节数
     bool isBlocked_ = false; // 标记当前协程是否因为触发高水位而进入了阻塞挂起模式
+
+    // 零拷贝相关状态
+    bool isZc_ = false; // 标记是否是零拷贝发送（用户缓冲区或 sendfile）
 };

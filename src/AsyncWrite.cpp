@@ -67,11 +67,13 @@ void AsyncWriteAwaitable::await_suspend(std::coroutine_handle<> handle) noexcept
         if (inFd_ >= 0)
         {
             // Sendfile 零拷贝模式
+            conn_->incrementPendingSpecialWrite();
             conn_->submitSendfileRequest(inFd_, offset_, count_);
         }
         else if (regBuf_ != nullptr)
         {
             // 固定缓冲区模式：使用已注册缓冲区发送数据
+            conn_->incrementPendingSpecialWrite();
             conn_->submitWriteRequestWithRegBuffer(regBuf_, regBufLen_, regBufIdx_);
         }
         else
@@ -93,19 +95,23 @@ int AsyncWriteAwaitable::await_resume() const noexcept
 
     if (inFd_ >= 0)
     {
-        // Sendfile 零拷贝模式：无需对 outputBuffer_ 进行操作
+        // Sendfile 零拷贝模式
+        conn_->decrementPendingSpecialWrite();
     }
     else if (regBuf_ != nullptr)
     {
-        // 固定缓冲区模式：写完后归还已注册缓冲区
-        // 注意：归还操作在 TcpConnection::releaseCurReadBuffer() 中进行，
-        // 因为读写可能使用同一个缓冲区
+        // 固定缓冲区模式
+        conn_->decrementPendingSpecialWrite();
     }
     else if (!isBlocked_ && n > 0)
     {
-        // 正常模式下，在这里移除已写入的数据
-        // 如果是 kBlock 阻塞模式，数据已经在 handler 循环中被 retrieve 移除了，这里不需要重复移除
+        // 正常模式
         conn_->getOutputBuffer().retrieve(n);
     }
+
+    // 每次实际的写操作完成后，检查连接是否处于 kDisconnecting 断开中状态。
+    // 如果是，并且 outputBuffer_ 已经被清空，说明收尾工作执行完毕，真正调用物理 shutdown
+    conn_->maybeShutdownWrite();
+
     return n;
 }
